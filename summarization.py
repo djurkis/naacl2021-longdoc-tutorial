@@ -8,25 +8,48 @@ from pytorch_lightning.callbacks import ModelCheckpoint
 from torch.utils.data import DataLoader, Dataset
 from transformers import AutoTokenizer, AutoConfig, AutoModelForSeq2SeqLM, set_seed, get_linear_schedule_with_warmup
 
+from pathlib import Path
+from toolz.itertoolz import concat
+
+from sklearn.model_selection import train_test_split
+
+
+
+def get_datasets(dataset_paths,tokenizer,args):
+    data = []
+
+    for d in dataset_paths:
+        p = Path(d)
+        files = p.listdir()
+        
+        for f in files:
+            with open(f,'r') as h:
+                ep = json.load(f)
+                data.append(ep)
+
+    train,evalu = train_test_split(data,random_state=0)
+
+    return SummarizationDataset(train,tokenizer,args),SummarizationDataset(evalu,tokenizer,args)
+
 
 class SummarizationDataset(Dataset):
     """HF arXiv Dataset Wrapper. It handles tokenization, max input/output seqlen, padding and batching"""
 
-    def __init__(self, hf_arxiv_dataset, tokenizer, args):
-        self.hf_arxiv_dataset = hf_arxiv_dataset
+    def __init__(self, data_l, tokenizer, args):
+        self.data = data_l
         self.tokenizer = tokenizer
         self.args = args
 
     def __len__(self):
         """Returns length of the dataset"""
-        return len(self.hf_arxiv_dataset)
+        return len(self.data)
 
     def __getitem__(self, idx):
         """Gets an example from the dataset. The input and output are tokenized and limited to a certain seqlen."""
-        entry = self.hf_arxiv_dataset[idx]
-        input_ids = self.tokenizer.encode(entry['article'], truncation=True, max_length=self.args.max_input_len,
+        entry = self.data[idx]
+        input_ids = self.tokenizer.encode(concat(entry['Recap']), truncation=True, max_length=self.args.max_input_len,
                                           padding='max_length')  # padding to max seqlen for const memory/example
-        output_ids = self.tokenizer.encode(entry['abstract'], truncation=True, max_length=self.args.max_output_len,
+        output_ids = self.tokenizer.encode(concat(entry['Transcript']), truncation=True, max_length=self.args.max_output_len,
                                            padding='max_length')  # padding to max seqlen for const memory/example
         return torch.tensor(input_ids), torch.tensor(output_ids)
 
@@ -111,7 +134,7 @@ class Summarizer(pl.LightningModule):
     def _get_dataloader(self, split_name, is_train):
         """Get training and validation dataloaders"""
         dataset_split = self.hf_dataset[split_name]
-        dataset = SummarizationDataset(hf_arxiv_dataset=dataset_split, tokenizer=self.tokenizer, args=self.args)
+        dataset = dataset_split
         sampler = torch.utils.data.distributed.DistributedSampler(dataset, shuffle=is_train)
         return DataLoader(dataset, batch_size=self.args.batch_size, shuffle=(sampler is None),
                           num_workers=self.args.num_workers, sampler=sampler,
@@ -189,7 +212,11 @@ if __name__ == "__main__":
     summarizer = Summarizer(args)
 
     # Load the arXiv dataset from HF datasets
-    summarizer.hf_dataset = datasets.load_dataset('scientific_papers', 'arxiv')
+    # directiories with jsons
+    paths=['']
+    train,validation = get_datasets(paths,tokenizer,args)
+
+    summarizer.hf_dataset ={'train':train,'validation':validation}
 
     checkpoint_callback = ModelCheckpoint(monitor='val_rouge1',
                                           mode="max",
